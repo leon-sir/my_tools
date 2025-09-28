@@ -3,6 +3,9 @@ import torch.nn as nn
 import numpy as np
 import torch.optim as optim
 from matplotlib import pyplot as plt
+import os
+
+BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 
 input_size = 1  # 输入变量的维度，一维
 batch_size = 1

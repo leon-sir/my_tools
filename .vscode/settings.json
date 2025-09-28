@@ -1,0 +1,10 @@
+{
+    "terminal.integrated.profiles.windows": {
+    "Ubuntu-20.04 (WSL)": {
+      "path": "C:\\Windows\\System32\\wsl.exe",
+      "args": [],
+      "icon": "terminal-bash"
+    }
+  },
+  "terminal.integrated.defaultProfile.windows": "Ubuntu-22.04 (WSL)",
+}
