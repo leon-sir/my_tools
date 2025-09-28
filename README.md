@@ -8,6 +8,7 @@ conda install matplotlib pandas
 python>= 3.8
 pip3 install torch==2.8.0 torchvision
 pip install numpy==1.23.5 pandas==2.3.1
+（台式cu121）
 # example
 ~bash$ 
 <!-- python3 actuator_net_mlp.py --mode train --data train_motor_csv/test.csv --output train_motor_csv/motor_test.pt -->
