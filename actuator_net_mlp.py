@@ -12,6 +12,7 @@ import pandas as pd
 
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 
+
 class Config:
     def __init__(self):
         self.lr = 8e-4
@@ -27,6 +28,7 @@ class Config:
         self.act = "softsign"
         self.dt = 0.02
 
+
 class ActuatorDataset(Dataset):
     def __init__(self, data):
         self.data = data
@@ -36,6 +38,7 @@ class ActuatorDataset(Dataset):
 
     def __getitem__(self, idx):
         return {k: v[idx] for k, v in self.data.items()}
+
 
 class Act(nn.Module):
     def __init__(self, act, slope=0.05):
@@ -74,12 +77,14 @@ class Act(nn.Module):
         else:
             raise RuntimeError(f"Undefined activation called {self.act}")
 
+
 def build_mlp(config):
     mods = [nn.Linear(config.in_dim, config.units), Act(config.act)]
     for i in range(config.layers - 1):
         mods += [nn.Linear(config.units, config.units), Act(config.act)]
     mods += [nn.Linear(config.units, config.out_dim)]
     return nn.Sequential(*mods)
+
 
 def load_data(data_path):
     data = pd.read_csv(data_path)
@@ -98,6 +103,7 @@ def load_data(data_path):
         data_dict[key] = np.array(data_dict[key]).T
 
     return data_dict, num_motors
+
 
 def process_data(data_dict, num_motors, step):
     joint_position_errors = data_dict["joint_pos_target_"] - data_dict["joint_pos_"]
@@ -127,6 +133,7 @@ def process_data(data_dict, num_motors, step):
     xs = torch.cat(xs, dim=0)
     ys = torch.cat(ys, dim=0)
     return xs, ys
+
 
 def train_actuator_network(xs, ys, actuator_network_path, config):
     num_data = xs.shape[0]
@@ -188,7 +195,9 @@ def train_actuator_network(xs, ys, actuator_network_path, config):
 
         model_scripted = torch.jit.script(model)  # Export to TorchScript
         model_scripted.save(actuator_network_path)  # Save
+
     return model
+
 
 def train_actuator_network_and_plot_predictions(data_path, actuator_network_path, load_pretrained_model=False, config=None):
 
@@ -229,6 +238,7 @@ def train_actuator_network_and_plot_predictions(data_path, actuator_network_path
         axs[i].plot(timesteps[:plot_length], tau_preds[:plot_length, i], label="Predicted torque", linestyle="--")
     fig.legend(["Calculated torque", "Real torque", "Predicted torque"], loc='upper right', bbox_to_anchor=(1, 1))
     plt.show()
+
 
 def main():
     parser = argparse.ArgumentParser()

@@ -1,0 +1,27 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Debug test lstm",
+            "type": "debugpy",
+            "request": "launch",
+            "args": ["--data", "train_turbo_csv/fly_robot_LPV_data.csv",
+                "--output", "train_turbo_csv/fly_robot_LPV.pt"],
+            "program": "${workspaceFolder}/actuator_lstm.py",
+            "console": "integratedTerminal",
+        },
+        {
+            "name": "Python: Debug mlp test",
+            "type": "debugpy",
+            "request": "launch",
+            "args": ["--mode", "train",
+                "--data", "train_motor_csv/robot_data_04_11_13_24_Ankle.csv",
+                "--output", "train_motor_csv/motor_Ankle.pt"],
+            "program": "${workspaceFolder}/actuator_net_mlp.py",
+            "console": "integratedTerminal",
+        },
+    ]
+}

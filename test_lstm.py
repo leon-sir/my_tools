@@ -4,9 +4,6 @@ import numpy as np
 import torch.optim as optim
 from matplotlib import pyplot as plt
 import os
-import pandas as pd
-
-import os
 
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 
@@ -16,24 +13,6 @@ hidden_size = 16
 num_layers = 1
 output_size = 1
 
-BASE_PATH = os.path.dirname(os.path.abspath(__file__))
-
-
-def load_data(data_path):
-    data = pd.read_csv(data_path)
-    if len(data) < 1:
-        return None, 0
-
-    num_motors = sum(1 for col in data.columns if col.startswith("tau_est_"))
-    columns = ["tau_est_", "tau_cal_", "joint_pos_", "joint_pos_target_", "joint_vel_"]
-
-    data_dict = {col: [] for col in columns}
-    for col in columns:
-        for i in range(num_motors):
-            data_dict[col].append(data[f"{col}{i}"].values)
-
-    for key in data_dict.keys():
-        data_dict[key] = np.array(data_dict[key]).T
 
 class Net(nn.Module):
 
@@ -58,15 +37,15 @@ class Net(nn.Module):
         hidden_prev：第一个时刻空间上所有层的记忆单元(batch, num_layer, hidden_len)
         输出out(batch,seq_len,hidden_len) 和 hidden_prev(batch,num_layer,hidden_len)
         """
-        # print("x", x)
-        # print("hidden_prev_1", hidden_prev)
-        out, hidden_prev = self.rnn(x, hidden_prev)     #out hn
-        # print("hidden_prev_2", hidden_prev)
-        # print("out",out)
+        print("x",x)
+        print("hidden_prev_1",hidden_prev)
+        out, hidden_prev = self.rnn(x, hidden_prev) #out hn
+        print("hidden_prev_2",hidden_prev)
+        print("out",out)
         '''
         out的最后一维输出等于hn
         '''
-        # print(out.shape)  # [49, 16]，49个点49个输出一次h0-h49
+        print(out.shape)  # [49, 16]，49个点49个输出一次h0-h49
         # 因为要把输出传给线性层处理，这里将batch和seq_len维度打平
         # 再把batch=1添加到最前面的维度（为了和y做MSE）
         # [batch=1,seq_len,hidden_len]->[seq_len,hidden_len]
@@ -114,7 +93,7 @@ for iter in range(6000):
     output的维度是(seq_len, batch_size, hidden_dim * directions)
     '''
     hidden_prev = hidden_prev.detach()  # 或着hidden_prev.data
-    # print("hidden_prev_detach", hidden_prev)
+    print("hidden_prev_detach", hidden_prev)
     loss = criterion(output, y)  # 计算MSE损失
     model.zero_grad()
     loss.backward()
