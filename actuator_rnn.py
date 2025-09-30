@@ -232,9 +232,9 @@ model.cpu()
 为什么隐藏变量是否初始化拟合效果差这么多？
 """
 
-hidden_prev = hidden_prev.cpu()
-# hidden_prev = torch.zeros(config.batch_size, config.num_layers, config.hidden_size).cpu()
-predictions = []
+# hidden_prev = hidden_prev.cpu()
+hidden_prev = torch.zeros(config.batch_size, config.num_layers, config.hidden_size).cpu()
+predictions_only_one_iput = []
 
 input = val_x[:, 0, :]           # 取seq_len里面第0号数据
 input = input.view(1, 1, 1)  # input：[1,1,1]
@@ -242,15 +242,26 @@ for _ in range(val_x.shape[1]):  # 迭代seq_len次
     pred, hidden_prev = model(input, hidden_prev)
     # 预测出的(下一个点的)序列pred当成输入(或者直接写成input, hidden_prev = model(input, hidden_prev))
     input = pred
-    predictions.append(pred.detach().numpy().ravel()[0])
+    predictions_only_one_iput.append(pred.detach().numpy().ravel()[0])
+
+hidden_prev = torch.zeros(config.batch_size, config.num_layers, config.hidden_size).cpu()
+predictions_series_iput = []
+for _ in range(val_x.shape[1]):  # 迭代seq_len次
+    input = val_x[:, _, :]           # 取seq_len里面第0号数据
+    input = input.view(1, 1, 1)  # input：[1,1,1]
+    pred, hidden_prev = model(input, hidden_prev)
+
+    predictions_series_iput.append(pred.detach().numpy().ravel()[0])
 
 val_x = val_x.data.numpy()
 val_y = val_y.data.numpy()
 plt.plot(time_steps[:-1], val_x.ravel(), label='x values (line)')
 
-plt.scatter(time_steps[:-1], val_x.ravel(), c='r', label='x (scatter)')  # x值
+plt.scatter(time_steps[:-1], val_x.ravel(), c='r', label='x (start)')  # x值
 plt.scatter(time_steps[1:], val_y.ravel(), c='y', label='y true')  # y值
-plt.scatter(time_steps[1:], predictions, c='b', label='y predicted')  # y的预测值
+plt.scatter(time_steps[1:], predictions_only_one_iput, c='b', label='y predicted one input')  
+plt.scatter(time_steps[1:], predictions_series_iput, c='k', label='y predicted series input')  
+plt.legend()
 plt.show()
 
 

@@ -10,7 +10,7 @@ BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 input_size = 1  # 输入变量的维度，一维
 batch_size = 1
 hidden_size = 16
-num_layers = 1
+num_layers = 2
 output_size = 1
 
 
@@ -19,7 +19,7 @@ class Net(nn.Module):
     def __init__(self):
         super().__init__()
 
-        self.rnn = nn.RNN(
+        self.rnn = nn.LSTM(
             input_size=input_size,    # feature_len = 1
             hidden_size=hidden_size,  # 隐藏记忆单元个数hidden_len = 16
             num_layers=num_layers,    # 网络层数 = 1
@@ -36,16 +36,16 @@ class Net(nn.Module):
         x：一次性输入所有样本所有时刻的值(batch,seq_len,feature_len)
         hidden_prev：第一个时刻空间上所有层的记忆单元(batch, num_layer, hidden_len)
         输出out(batch,seq_len,hidden_len) 和 hidden_prev(batch,num_layer,hidden_len)
-        """
-        print("x",x)
-        print("hidden_prev_1",hidden_prev)
+        # """
+        # print("x",x)
+        # print("hidden_prev_1",hidden_prev)
         out, hidden_prev = self.rnn(x, hidden_prev) #out hn
-        print("hidden_prev_2",hidden_prev)
-        print("out",out)
+        # print("hidden_prev_2",hidden_prev)
+        # print("out",out)
         '''
         out的最后一维输出等于hn
         '''
-        print(out.shape)  # [49, 16]，49个点49个输出一次h0-h49
+        # print(out.shape)  # [49, 16]，49个点49个输出一次h0-h49
         # 因为要把输出传给线性层处理，这里将batch和seq_len维度打平
         # 再把batch=1添加到最前面的维度（为了和y做MSE）
         # [batch=1,seq_len,hidden_len]->[seq_len,hidden_len]
@@ -59,16 +59,18 @@ class Net(nn.Module):
 
 
 # 训练过程
-learning_rate = 0.01
+learning_rate = 0.005
 model = Net()
 criterion = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 # 初始化记忆单元h0[batch,num_layer,hidden_len]
-hidden_prev = torch.zeros(batch_size, num_layers, hidden_size)
+h_0 = torch.zeros(num_layers, batch_size, hidden_size)
+c_0 = torch.zeros(num_layers, batch_size, hidden_size)
+hidden_prev = (h_0, c_0)
 num_time_steps = 50  # 区间内取多少样本点
 
 
-for iter in range(6000):
+for iter in range(10000):
     # 在0~3之间随机取开始的时刻点
     start = np.random.randint(3, size=1)[0]
     # 在[start,start+10]区间均匀地取num_points个点
@@ -92,14 +94,15 @@ for iter in range(6000):
     hn的维度是(num_layers * directions, batch_size, hidden_dim)
     output的维度是(seq_len, batch_size, hidden_dim * directions)
     '''
-    hidden_prev = hidden_prev.detach()  # 或着hidden_prev.data
-    print("hidden_prev_detach", hidden_prev)
+    # hidden_prev = hidden_prev.detach()  # 或着hidden_prev.data
+    hidden_prev = (hidden_prev[0].detach(), hidden_prev[1].detach())
+    # print("hidden_prev_detach", hidden_prev)
     loss = criterion(output, y)  # 计算MSE损失
     model.zero_grad()
     loss.backward()
     optimizer.step()
 
-    if iter % 1000 == 0:
+    if iter % 100 == 0:
         print("Iteration: {} loss {}".format(iter, loss.item()))
 
 
@@ -114,19 +117,28 @@ y = torch.tensor(data[1:]).float().view(1, num_time_steps - 1, 1)
 
 predictions = []
 
+# 在测试前，必须重新初始化隐藏状态为一个干净的零状态
+h_0_test = torch.zeros(num_layers, batch_size, hidden_size)
+c_0_test = torch.zeros(num_layers, batch_size, hidden_size)
+hidden_prev_test = (h_0_test, c_0_test)
+# hidden_prev_test = hidden_prev
+
 input = x[:, 0, :]           # 取seq_len里面第0号数据
 input = input.view(1, 1, 1)  # input：[1,1,1]
 for _ in range(x.shape[1]):  # 迭代seq_len次
-    pred, hidden_prev = model(input, hidden_prev)
+    input = x[:, _, :]           # 取seq_len里面第0号数据
+    input = input.view(1, 1, 1)  # input：[1,1,1]
+    pred, hidden_prev_test = model(input, hidden_prev_test)
     # 预测出的(下一个点的)序列pred当成输入(或者直接写成input, hidden_prev = model(input, hidden_prev))
-    input = pred
+    # input = pred[:, -1, :].view(1, 1, 1)
     predictions.append(pred.detach().numpy().ravel()[0])
 
 x = x.data.numpy()
 y = y.data.numpy()
-plt.plot(time_steps[:-1], x.ravel())
+plt.plot(time_steps[:-1], x.ravel(), label='x values (line)')  # 为折线图添加标签
 
-plt.scatter(time_steps[:-1], x.ravel(), c='r')  # x值
-plt.scatter(time_steps[1:], y.ravel(), c='y')  # y值
-plt.scatter(time_steps[1:], predictions, c='b')  # y的预测值
+plt.scatter(time_steps[:-1], x.ravel(), c='r', label='x (scatter)')  # x值，添加标签
+plt.scatter(time_steps[1:], y.ravel(), c='y', label='y true')  # y值，添加标签
+plt.scatter(time_steps[1:], predictions, c='b', label='y predicted')  # y的预测值，添加标签
+plt.legend()
 plt.show()

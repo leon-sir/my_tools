@@ -36,4 +36,8 @@ python3 actuator_net_mlp.py --mode play --data train_motor_csv/robot_data_04_11_
 
 ```bash
 python3 test_lstm.py
+python3 actuator_lstm.py --data train_turbo_csv/fly_robot_LPV_data.csv --output train_turbo_csv/fly_robot_LPV.pt
+python3 actuator_rnn.py --data train_turbo_csv/fly_robot_LPV_data.csv --output train_turbo_csv/fly_robot_LPV.pt
 ```
+
+

@@ -198,7 +198,7 @@ def train_actuator_network(xs, ys, actuator_network_path, config):
 
     return model
 
-
+,
 def train_actuator_network_and_plot_predictions(data_path, actuator_network_path, load_pretrained_model=False, config=None):
 
     print(f"Load data: {data_path}")
