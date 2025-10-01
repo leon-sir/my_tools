@@ -1,6 +1,7 @@
 import torch
 
 actuator_network_path = "pretrained_actuator_nets/anydrive_v3_lstm.pt"
+# actuator_network_path = "train_turbo_csv/fly_robot_LPV.pt"
 model = torch.jit.load(actuator_network_path).to("cpu")
 
 

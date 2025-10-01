@@ -6,7 +6,7 @@ import torch.nn as nn
 import numpy as np
 import torch.optim as optim
 from matplotlib import pyplot as plt
-from typing import Tuple, Optional 
+from typing import Tuple, Optional  # noqa: F401
 
 
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -18,23 +18,24 @@ BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 
 class Config:
     def __init__(self):
-        self.using_real_data = False
-        self.lr = 1e-2
+        self.using_real_data = True
+        self.lr = 1e-3
         self.eps = 1e-8
         self.weight_decay = 0.0
         self.epochs = 200
-        # self.batch_size = 200
         self.batch_size = 1
         self.num_time_steps = 50
         self.device = "cuda:0"
         self.in_dim = 1
-        self.units = 32
-        self.num_layers = 2
+        self.num_layers = 2     # lstm layers
         self.out_dim = 1
         self.act = "softsign"
-        self.dt = 0.001
-        self.iterations = 6000
+        self.dt = 0.005
+        self.iterations = 3000
         self.hidden_size = 16
+        self.linear_units = 8
+        self.input_scale = 1.5  # turbojet fuel flow(W(kg/s))
+        self.output_scale = 70  # turbojet force
 
 
 def load_data(data_path):
@@ -72,6 +73,10 @@ class LSTM_Net(nn.Module):
 
         self.hidden_size = config.hidden_size
 
+        # 注册缩放因子作为模型的缓冲区
+        self.register_buffer('input_scale', torch.tensor(config.input_scale, dtype=torch.float))
+        self.register_buffer('output_scale', torch.tensor(config.output_scale, dtype=torch.float))
+
         self.rnn = nn.LSTM(
             input_size=config.in_dim,    # feature_len = 1
             hidden_size=config.hidden_size,  # 隐藏记忆单元个数hidden_len = 16
@@ -82,7 +87,13 @@ class LSTM_Net(nn.Module):
         for p in self.rnn.parameters():  # 对RNN层的参数做初始化
             nn.init.normal_(p, mean=0.0, std=0.001)
 
-        self.linear = nn.Linear(config.hidden_size, config.out_dim)  # 输出层
+        self.linear = nn.Sequential(
+            nn.Linear(config.hidden_size, config.linear_units),
+            nn.Softsign(),
+            # nn.ReLU(),
+            nn.Linear(config.linear_units, config.out_dim)
+        )
+        # self.linear = nn.Linear(config.hidden_size, config.out_dim)  # 输出层
 
     def forward(self, x: torch.Tensor, hidden_prev: Tuple[torch.Tensor, torch.Tensor]
                 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
@@ -92,6 +103,8 @@ class LSTM_Net(nn.Module):
         hidden_prev: 第一个时刻空间上所有层的记忆单元(batch, num_layer, hidden_len)
         输出out(batch,seq_len,hidden_len) 和 hidden_prev(batch,num_layer,hidden_len)
         """
+        # 1. 应用输入缩放
+        x = x / self.input_scale
 
         out, hidden_prev = self.rnn(x, hidden_prev)     # out hn
 
@@ -107,6 +120,9 @@ class LSTM_Net(nn.Module):
         out = self.linear(out)
         # [seq_len,output_size=1]->[batch=1,seq_len,output_size=1]
         out = out.unsqueeze(dim=0)
+
+        # 2. 应用输出缩放
+        out = out * self.output_scale
         return out, hidden_prev
 
 
@@ -119,8 +135,7 @@ def train_actuator_network(train_x: None, train_y: None,
 
     optimizer = optim.Adam(model.parameters(), lr=config.lr,
                            eps=config.eps, weight_decay=config.weight_decay)
-    # 初始化记忆单元h0[batch,num_layer,hidden_len]
-    # 初始化记忆单元h0[batch,num_layer,hidden_len]
+    # 初始化记忆单元h0，c0永远是 (num_layers, batch_size, hidden_size)
     h_0 = torch.zeros(config.num_layers, config.batch_size, config.hidden_size).to(config.device)
     c_0 = torch.zeros(config.num_layers, config.batch_size, config.hidden_size).to(config.device)
     hidden_prev = (h_0, c_0)
@@ -129,6 +144,7 @@ def train_actuator_network(train_x: None, train_y: None,
     num_time_steps = config.num_time_steps
 
     for iter in range(config.iterations):
+
         if config.using_real_data:
             start_idx = np.random.randint(0, train_len)
             end_idx = start_idx + config.num_time_steps
@@ -155,7 +171,7 @@ def train_actuator_network(train_x: None, train_y: None,
             # 以上步骤生成(x,y)数据对
 
         '''
-            因为结点的个数是16，所以词向量的维度为16，所以初始输入的向量h0的维度也需要16
+            因为结点的个数是16,所以词向量的维度为16,所以初始输入的向量h0的维度也需要16
         '''
         output, hidden_prev = model(x, hidden_prev)  # 喂入模型得到输出
         '''
@@ -170,9 +186,10 @@ def train_actuator_network(train_x: None, train_y: None,
         loss = criterion(output, y)  # 计算MSE损失
         model.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
-        if iter % 100 == 0:
+        if iter % 1000 == 0:
             print("Iteration: {} loss {}".format(iter, loss.item()))
 
     # print total loss
@@ -193,13 +210,18 @@ parser.add_argument("--output", type=str, required=True, help="Path to save or l
 args = parser.parse_args()
 data_path = os.path.join(BASE_PATH, args.data)
 output_path = os.path.join(BASE_PATH, args.output)
+policy_path = os.path.join(output_path, "actuator_net.pt")
+figure_path = os.path.join(output_path, "figure.png")
 config = Config()
 
 data_dict, num_jets = load_data(data_path)
 
 if config.using_real_data:
+    # xs = torch.tensor(data_dict["w_f"][:, 0:1], dtype=torch.float)/config.input_scale
+    # ys = torch.tensor(data_dict["F"][:, 0:1], dtype=torch.float)/config.output_scale
     xs = torch.tensor(data_dict["w_f"][:, 0:1], dtype=torch.float)
     ys = torch.tensor(data_dict["F"][:, 0:1], dtype=torch.float)
+    Time = torch.tensor(data_dict["Time"][:, 0:1], dtype=torch.float)
 
     num_data = xs.shape[0]
     num_train = int(num_data * 0.8)
@@ -209,26 +231,45 @@ if config.using_real_data:
     train_y = ys[:num_train]
 
     # 验证数据
-    val_x = xs[num_train:]
-    val_y = ys[num_train:]
+    val_x = xs[num_train:].unsqueeze(0)
+    val_y = ys[num_train:].unsqueeze(0)
+    time_steps = Time[num_train:]-Time[num_train]
 
-    # xs.append(data_dict["w_f"])
-    # xs = torch.tensor(xs, dtype=torch.float)
-    # ys.append(data_dict["F"])
-    # ys = torch.tensor(ys, dtype=torch.float)
-    # num_data = xs.shape[0]
-    # num_train = num_data // 5 * 4
-    # num_test = num_data - num_train
-    # 分割数据
     model, hidden_prev = train_actuator_network(train_x=train_x, train_y=train_y,
-                                                actuator_network_path=output_path, config=config)
+                                                actuator_network_path=policy_path, config=config)
 else:
-    model, hidden_prev = train_actuator_network(train_x=torch.tensor([0]), train_y=0, actuator_network_path=output_path, config=config)
+    model, hidden_prev = train_actuator_network(train_x=torch.tensor([0]), train_y=0,
+                                                actuator_network_path=policy_path, config=config)
 
 
 # Validation
 if config.using_real_data:
-    pass
+    model.cpu()
+
+    h_0_val = torch.zeros(config.num_layers, config.batch_size, config.hidden_size).cpu()
+    c_0_val = torch.zeros(config.num_layers, config.batch_size, config.hidden_size).cpu()
+    hidden_prev = (h_0_val, c_0_val)
+    predictions = []
+
+    # input = val_x[:, 0, :]           # 取seq_len里面第0号数据
+    # input = input.view(1, 1, 1)  # input：[1,1,1]
+    for _ in range(val_x.shape[1]):  # 迭代seq_len次
+        input = val_x[:, _, :]           # 取seq_len里面第0号数据
+        input = input.view(1, 1, 1)  # input：[1,1,1]
+        pred, hidden_prev = model(input, hidden_prev)
+        # 预测出的(下一个点的)序列pred当成输入(或者直接写成input, hidden_prev = model(input, hidden_prev))
+        # input = pred
+        predictions.append(pred.detach().numpy().ravel()[0])
+
+    val_x = val_x.data.numpy()
+    val_y = val_y.data.numpy()
+
+    plt.plot(time_steps, val_y.ravel(), c='y', label='y true')  # y值
+    plt.plot(time_steps, predictions, c='b', label='y predicted')  # y的预测值
+    plt.legend()
+    plt.savefig(figure_path, dpi=300, bbox_inches='tight')
+    plt.show()
+
 else:
     # 先用同样的方式生成一组数据x,y
     start = np.random.randint(3, size=1)[0]
@@ -238,33 +279,30 @@ else:
     val_x = torch.tensor(data[:-1]).float().view(1, config.num_time_steps - 1, 1)
     val_y = torch.tensor(data[1:]).float().view(1, config.num_time_steps - 1, 1)
 
-model.cpu()
+    model.cpu()
 
+    h_0_val = torch.zeros(config.num_layers, config.batch_size, config.hidden_size).cpu()
+    c_0_val = torch.zeros(config.num_layers, config.batch_size, config.hidden_size).cpu()
+    hidden_prev = (h_0_val, c_0_val)
+    predictions = []
 
-# hidden_prev = hidden_prev.cpu()
-# hidden_prev = torch.zeros(config.batch_size, config.num_layers, config.hidden_size).cpu()
-h_0_val = torch.zeros(config.num_layers, config.batch_size, config.hidden_size).cpu()
-c_0_val = torch.zeros(config.num_layers, config.batch_size, config.hidden_size).cpu()
-hidden_prev = (h_0_val, c_0_val)
-predictions = []
+    input = val_x[:, 0, :]           # 取seq_len里面第0号数据
+    input = input.view(1, 1, 1)  # input：[1,1,1]
+    for _ in range(val_x.shape[1]):  # 迭代seq_len次
+        pred, hidden_prev = model(input, hidden_prev)
+        # 预测出的(下一个点的)序列pred当成输入(或者直接写成input, hidden_prev = model(input, hidden_prev))
+        input = pred
+        predictions.append(pred.detach().numpy().ravel()[0])
 
-input = val_x[:, 0, :]           # 取seq_len里面第0号数据
-input = input.view(1, 1, 1)  # input：[1,1,1]
-for _ in range(val_x.shape[1]):  # 迭代seq_len次
-    pred, hidden_prev = model(input, hidden_prev)
-    # 预测出的(下一个点的)序列pred当成输入(或者直接写成input, hidden_prev = model(input, hidden_prev))
-    input = pred
-    predictions.append(pred.detach().numpy().ravel()[0])
+    val_x = val_x.data.numpy()
+    val_y = val_y.data.numpy()
+    plt.plot(time_steps[:-1], val_x.ravel(), label='x values (line)')
 
-val_x = val_x.data.numpy()
-val_y = val_y.data.numpy()
-plt.plot(time_steps[:-1], val_x.ravel(), label='x values (line)')
-
-plt.scatter(time_steps[:-1], val_x.ravel(), c='r', label='x (start)')  # x值
-plt.scatter(time_steps[1:], val_y.ravel(), c='y', label='y true')  # y值
-plt.scatter(time_steps[1:], predictions, c='b', label='y predicted')  # y的预测值
-plt.legend
-plt.show()
+    plt.scatter(time_steps[:-1], val_x.ravel(), c='r', label='x (start)')  # x值
+    plt.scatter(time_steps[1:], val_y.ravel(), c='y', label='y true')  # y值
+    plt.scatter(time_steps[1:], predictions, c='b', label='y predicted')  # y的预测值
+    plt.legend()
+    plt.show()
 
 
 # def main():
