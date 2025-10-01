@@ -6,9 +6,14 @@ import torch.nn as nn
 import numpy as np
 import torch.optim as optim
 from matplotlib import pyplot as plt
+from typing import Tuple, Optional 
 
 
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
+
+""" To do list
+晚点把.csv的数据步长改为0.005s
+"""
 
 
 class Config:
@@ -24,7 +29,7 @@ class Config:
         self.device = "cuda:0"
         self.in_dim = 1
         self.units = 32
-        self.num_layers = 1
+        self.num_layers = 2
         self.out_dim = 1
         self.act = "softsign"
         self.dt = 0.001
@@ -67,10 +72,10 @@ class LSTM_Net(nn.Module):
 
         self.hidden_size = config.hidden_size
 
-        self.rnn = nn.RNN(
+        self.rnn = nn.LSTM(
             input_size=config.in_dim,    # feature_len = 1
             hidden_size=config.hidden_size,  # 隐藏记忆单元个数hidden_len = 16
-            num_layers=config.num_layers,    # 网络层数 = 1
+            num_layers=config.num_layers,    # 网络层数 = 1 or 2
             batch_first=True,         # 在传入数据时,按照[batch,seq_len,feature_len]的格式
         )
 
@@ -79,21 +84,20 @@ class LSTM_Net(nn.Module):
 
         self.linear = nn.Linear(config.hidden_size, config.out_dim)  # 输出层
 
-    def forward(self, x, hidden_prev):
+    def forward(self, x: torch.Tensor, hidden_prev: Tuple[torch.Tensor, torch.Tensor]
+                ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+
         """
         x: 一次性输入所有样本所有时刻的值(batch,seq_len,feature_len)
         hidden_prev: 第一个时刻空间上所有层的记忆单元(batch, num_layer, hidden_len)
         输出out(batch,seq_len,hidden_len) 和 hidden_prev(batch,num_layer,hidden_len)
         """
-        # print("x", x)
-        # print("hidden_prev_1", hidden_prev)
+
         out, hidden_prev = self.rnn(x, hidden_prev)     # out hn
-        # print("hidden_prev_2", hidden_prev)
-        # print("out",out)
+
         '''
         out的最后一维输出等于hn
         '''
-        # print(out.shape)  # [49, 16]，49个点49个输出一次h0-h49
         # 因为要把输出传给线性层处理，这里将batch和seq_len维度打平
         # 再把batch=1添加到最前面的维度（为了和y做MSE）
         # [batch=1,seq_len,hidden_len]->[seq_len,hidden_len]
@@ -116,7 +120,11 @@ def train_actuator_network(train_x: None, train_y: None,
     optimizer = optim.Adam(model.parameters(), lr=config.lr,
                            eps=config.eps, weight_decay=config.weight_decay)
     # 初始化记忆单元h0[batch,num_layer,hidden_len]
-    hidden_prev = torch.zeros(config.batch_size, config.num_layers, config.hidden_size).to(config.device)
+    # 初始化记忆单元h0[batch,num_layer,hidden_len]
+    h_0 = torch.zeros(config.num_layers, config.batch_size, config.hidden_size).to(config.device)
+    c_0 = torch.zeros(config.num_layers, config.batch_size, config.hidden_size).to(config.device)
+    hidden_prev = (h_0, c_0)
+    # hidden_prev = torch.zeros(config.batch_size, config.num_layers, config.hidden_size).to(config.device)
     train_len = train_x.shape[0] - config.num_time_steps
     num_time_steps = config.num_time_steps
 
@@ -128,6 +136,9 @@ def train_actuator_network(train_x: None, train_y: None,
             # [seq_len, feature] -> [batch=1, seq_len, feature]
             x = train_x[start_idx:end_idx-1].unsqueeze(0).to(config.device)
             y = train_y[start_idx+1:end_idx].unsqueeze(0).to(config.device)
+            """ To do list
+            涡喷数据最好再加个normalizer
+            """
             pass
         else:
             # 在0~3之间随机取开始的时刻点
@@ -153,7 +164,8 @@ def train_actuator_network(train_x: None, train_y: None,
         hn的维度是(num_layers * directions, batch_size, hidden_dim)
         output的维度是(seq_len, batch_size, hidden_dim * directions)
         '''
-        hidden_prev = hidden_prev.detach()  # 或着hidden_prev.data
+        hidden_prev = (hidden_prev[0].detach(), hidden_prev[1].detach())
+        # hidden_prev = hidden_prev.detach()  # 或着hidden_prev.data
         # print("hidden_prev_detach", hidden_prev)
         loss = criterion(output, y)  # 计算MSE损失
         model.zero_grad()
@@ -228,12 +240,12 @@ else:
 
 model.cpu()
 
-"""To do list
-为什么隐藏变量是否初始化拟合效果差这么多？
-"""
 
-hidden_prev = hidden_prev.cpu()
+# hidden_prev = hidden_prev.cpu()
 # hidden_prev = torch.zeros(config.batch_size, config.num_layers, config.hidden_size).cpu()
+h_0_val = torch.zeros(config.num_layers, config.batch_size, config.hidden_size).cpu()
+c_0_val = torch.zeros(config.num_layers, config.batch_size, config.hidden_size).cpu()
+hidden_prev = (h_0_val, c_0_val)
 predictions = []
 
 input = val_x[:, 0, :]           # 取seq_len里面第0号数据
@@ -248,9 +260,10 @@ val_x = val_x.data.numpy()
 val_y = val_y.data.numpy()
 plt.plot(time_steps[:-1], val_x.ravel(), label='x values (line)')
 
-plt.scatter(time_steps[:-1], val_x.ravel(), c='r', label='x (scatter)')  # x值
+plt.scatter(time_steps[:-1], val_x.ravel(), c='r', label='x (start)')  # x值
 plt.scatter(time_steps[1:], val_y.ravel(), c='y', label='y true')  # y值
 plt.scatter(time_steps[1:], predictions, c='b', label='y predicted')  # y的预测值
+plt.legend
 plt.show()
 
 
