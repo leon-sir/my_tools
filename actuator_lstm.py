@@ -19,11 +19,11 @@ BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 class Config:
     def __init__(self):
         self.using_real_data = True
-        self.lr = 1e-3
+        self.lr = 1e-4
         self.eps = 1e-8
         self.weight_decay = 0.0
         self.epochs = 200
-        self.batch_size = 1
+        self.batch_size = 1     # 这个版本batch_size只能为1
         self.num_time_steps = 50
         self.device = "cuda:0"
         self.in_dim = 1
@@ -31,8 +31,8 @@ class Config:
         self.out_dim = 1
         self.act = "softsign"
         self.dt = 0.005
-        self.iterations = 3000
-        self.hidden_size = 16
+        self.iterations = 30000
+        self.hidden_size = 50
         self.linear_units = 8
         self.input_scale = 1.5  # turbojet fuel flow(W(kg/s))
         self.output_scale = 70  # turbojet force
@@ -87,13 +87,14 @@ class LSTM_Net(nn.Module):
         for p in self.rnn.parameters():  # 对RNN层的参数做初始化
             nn.init.normal_(p, mean=0.0, std=0.001)
 
-        self.linear = nn.Sequential(
-            nn.Linear(config.hidden_size, config.linear_units),
-            nn.Softsign(),
-            # nn.ReLU(),
-            nn.Linear(config.linear_units, config.out_dim)
-        )
-        # self.linear = nn.Linear(config.hidden_size, config.out_dim)  # 输出层
+        """先不加mlp"""
+        # self.linear = nn.Sequential(
+        #     nn.Linear(config.hidden_size, config.linear_units),
+        #     nn.Softsign(),
+        #     # nn.ReLU(),
+        #     nn.Linear(config.linear_units, config.out_dim)
+        # )
+        self.linear = nn.Linear(config.hidden_size, config.out_dim)  # 输出层
 
     def forward(self, x: torch.Tensor, hidden_prev: Tuple[torch.Tensor, torch.Tensor]
                 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
@@ -210,8 +211,9 @@ parser.add_argument("--output", type=str, required=True, help="Path to save or l
 args = parser.parse_args()
 data_path = os.path.join(BASE_PATH, args.data)
 output_path = os.path.join(BASE_PATH, args.output)
-policy_path = os.path.join(output_path, "actuator_net.pt")
-figure_path = os.path.join(output_path, "figure.png")
+current_script_name = os.path.splitext(os.path.basename(__file__))[0]
+policy_path = os.path.join(output_path, f"{current_script_name}_net.pt")
+figure_path = os.path.join(output_path, f"{current_script_name}_figure.png")
 config = Config()
 
 data_dict, num_jets = load_data(data_path)
@@ -265,7 +267,7 @@ if config.using_real_data:
     val_y = val_y.data.numpy()
 
     plt.plot(time_steps, val_y.ravel(), c='y', label='y true')  # y值
-    plt.plot(time_steps, predictions, c='b', label='y predicted')  # y的预测值
+    plt.plot(time_steps+config.num_time_steps*config.dt, predictions, c='b', label='y predicted')  # y的预测值
     plt.legend()
     plt.savefig(figure_path, dpi=300, bbox_inches='tight')
     plt.show()
