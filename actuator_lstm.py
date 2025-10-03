@@ -267,7 +267,8 @@ if config.using_real_data:
     val_y = val_y.data.numpy()
 
     plt.plot(time_steps, val_y.ravel(), c='y', label='y true')  # y值
-    plt.plot(time_steps+config.num_time_steps*config.dt, predictions, c='b', label='y predicted')  # y的预测值
+    plt.plot(time_steps+config.num_time_steps*config.dt, predictions,
+             c='b', label='y predicted', linestyle='--')  # y的预测值
     plt.legend()
     plt.savefig(figure_path, dpi=300, bbox_inches='tight')
     plt.show()

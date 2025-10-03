@@ -230,13 +230,16 @@ def train_actuator_network_and_plot_predictions(data_path, actuator_network_path
     tau_ests = data_dict["tau_est_"][step:step + len(tau_preds)]
     tau_preds = tau_preds[:plot_length]
 
-    fig, axs = plt.subplots(6, 2, figsize=(14, 6))
+    fig, axs = plt.subplots((num_motors + 1) // 2, 2, figsize=(14, 6))
     axs = np.array(axs).flatten()
     for i in range(num_motors):
         axs[i].plot(timesteps[:plot_length], tau_cals[:plot_length, i], label="Calculated torque")
         axs[i].plot(timesteps[:plot_length], tau_ests[:plot_length, i], label="Real torque")
         axs[i].plot(timesteps[:plot_length], tau_preds[:plot_length, i], label="Predicted torque", linestyle="--")
     fig.legend(["Calculated torque", "Real torque", "Predicted torque"], loc='upper right', bbox_to_anchor=(1, 1))
+    if num_motors % 2 != 0:
+        axs[-1].axis('off')
+
     plt.show()
 
 
@@ -264,6 +267,7 @@ def main():
         load_pretrained_model=load_pretrained_model,
         config=config,
     )
+
 
 if __name__ == "__main__":
     main()

@@ -1,5 +1,11 @@
 import torch
 
+""" 可视化anymal的电机lstm,大致确定网络结构
+ref: 
+Rudin, N., Hoeller, D., et.al (2021). Learning to walk in minutes using massively
+    parallel deep reinforcement learning.
+https://github.com/leggedrobotics/legged_gym
+"""
 actuator_network_path = "pretrained_actuator_nets/anydrive_v3_lstm.pt"
 # actuator_network_path = "train_turbo_csv/fly_robot_LPV.pt"
 model = torch.jit.load(actuator_network_path).to("cpu")

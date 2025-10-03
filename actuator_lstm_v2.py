@@ -7,7 +7,7 @@ import numpy as np
 import torch.optim as optim
 from matplotlib import pyplot as plt
 from typing import Tuple, Optional  # noqa: F401
-
+import random  # 导入 random 模块
 
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 
@@ -18,7 +18,7 @@ class Config:
         self.lr = 1e-3
         self.eps = 1e-8
         self.weight_decay = 0.0
-        self.batch_size = 1
+        self.batch_size = 40
         self.num_time_steps = 50
         self.device = "cuda:0"
         self.in_dim = 1
@@ -125,58 +125,49 @@ def train_actuator_network(train_x: None, train_y: None,
     optimizer = optim.Adam(model.parameters(), lr=config.lr,
                            eps=config.eps, weight_decay=config.weight_decay)
 
+    # train_len = train_x.shape[0] - config.num_time_steps -1
     train_len = train_x.shape[0] - config.num_time_steps
 
     for iter in range(config.iterations):
         # prepare batch_size data
+        # start_indices = np.random.randint(0, train_len, size=config.batch_size)
         start_indices = np.random.randint(0, train_len, size=config.batch_size)
 
-        batch_x = []
-        batch_y = []
-
-        for start_idx in start_indices:
-            window_end_idx = start_idx + config.num_time_steps
-            target_idx = window_end_idx
-
-            # 收集一个窗口的输入和一个目标输出
-            batch_x.append(train_x[start_idx:window_end_idx])
-            batch_y.append(train_y[target_idx])
-
-        # 4. 将数据列表堆叠成一个批次张量，并移动到GPU
-        # x shape: [batch_size, num_time_steps, in_dim] -> [10, 50, 1]
-        x = torch.stack(batch_x).to(config.device)
-        # y shape: [batch_size, out_dim] -> [10, 1]
-        y = torch.stack(batch_y).to(config.device)
-
-        # 初始化记忆单元h0，c0永远是 (num_layers, batch_size, hidden_size)
-        h_0 = torch.zeros(config.num_layers, config.batch_size, config.hidden_size).to(config.device)   # 短期（工作）记忆
-        c_0 = torch.zeros(config.num_layers, config.batch_size, config.hidden_size).to(config.device)   # 长期记忆
-        hidden_prev = (h_0, c_0)
-
-        # start_idx = np.random.randint(0, train_len)
-        # # end_idx = start_idx + config.num_time_steps
-        # # 定义输入窗口和目标点
-        # window_end_idx = start_idx + config.num_time_steps
-        # target_idx = window_end_idx     # 目标是窗口结束后的那个点
-
-        # # [seq_len, feature] -> [batch=1, seq_len, feature]
-        # x = train_x[start_idx:window_end_idx].unsqueeze(0).to(config.device)        # x是包含过去N个点的序列
-        # y = train_y[target_idx].unsqueeze(0).to(config.device)                      # y是序列结束后的单个点
-
-        output, _ = model(x, hidden_prev)  # 喂入模型得到输出
-        # hidden_prev = (hidden_prev[0].detach(), hidden_prev[1].detach())
-        last_output = output.squeeze(1)     # 只取序列的最后一个输出用于计算损失
-        # last_output = output[:, -1, :]      # 只取序列的最后一个输出用于计算损失
-
-        # loss = criterion(output, y)  # 计算MSE损失
-        loss = criterion(last_output, y)
+        h = torch.zeros(config.num_layers, config.batch_size, config.hidden_size).to(config.device)     # 短期（工作）记忆
+        c = torch.zeros(config.num_layers, config.batch_size, config.hidden_size).to(config.device)     # 长期记忆
         model.zero_grad()
-        loss.backward()
+
+        # Truncated Backpropagation Through Time（截断式反向传播TBPTT）
+        # 参考 https://lightning.ai/docs/pytorch/stable/common/tbptt.html
+        total_loss = 0
+
+        for t in range(config.num_time_steps):
+            current_x_batch = train_x[start_indices + t].to(config.device)   # Shape: [batch_size, 1]
+            target_y_batch = train_y[start_indices + t].to(config.device)   # Shape: [batch_size, 1]
+
+            current_x_batch = current_x_batch.unsqueeze(1)
+            # 将上一步的隐藏状态分离，避免梯度无限回传
+            hidden_prev = (h.detach(), c.detach())
+
+            pred, (h, c) = model(current_x_batch, hidden_prev)
+
+            loss = criterion(pred.squeeze(1), target_y_batch)
+
+            # 约后面的信号应该预测越准
+            # weight = 0.1 + 0.9 * (t / (config.num_time_steps - 1))
+
+            # loss = loss * weight
+            total_loss += loss.item()
+
+            # 反向传播（可以在每个时间步都做，也可以累积total loss在循环外）
+            loss.backward()
+
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
-        if iter % 1000 == 0:
-            print("Iteration: {} loss {}".format(iter, loss.item()))
+        if iter % 100 == 0:
+            mae = total_loss / config.num_time_steps / config.output_scale**2
+            print(f"Iteration: {iter} | loss {loss.item()}| mae: {mae:.4f}")
 
     # print total loss
     print(f"Finished Training. Final Loss: {loss.item():.6f}")
@@ -193,7 +184,9 @@ def train_actuator_network(train_x: None, train_y: None,
 parser = argparse.ArgumentParser()
 parser.add_argument("--data", type=str, required=True, help="Path of data files")
 parser.add_argument("--output", type=str, required=True, help="Path to save or load the actuator network model")
+# parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
 args = parser.parse_args()
+
 data_path = os.path.join(BASE_PATH, args.data)
 output_path = os.path.join(BASE_PATH, args.output)
 current_script_name = os.path.splitext(os.path.basename(__file__))[0]
@@ -227,29 +220,22 @@ model, hidden_prev = train_actuator_network(train_x=train_x, train_y=train_y,
 model = torch.jit.load(policy_path).to("cpu")
 
 # 滑动窗口lstm的隐藏变量每次都要重置，自回归lstm需要保留
-h_0_val = torch.zeros(config.num_layers, config.batch_size, config.hidden_size).cpu()
-c_0_val = torch.zeros(config.num_layers, config.batch_size, config.hidden_size).cpu()
+h_0_val = torch.zeros(config.num_layers, 1, config.hidden_size).cpu()
+c_0_val = torch.zeros(config.num_layers, 1, config.hidden_size).cpu()
 hidden_prev = (h_0_val, c_0_val)
 predictions = []
 
-# 遍历验证集，使用滑动窗口进行预测
-for i in range(val_x.shape[0] - config.num_time_steps):
-    # 构造输入窗口
-    start_idx = i
-    end_idx = i + config.num_time_steps
-    input_window = val_x[start_idx:end_idx].unsqueeze(0)    # Shape: [1, num_time_steps, 1]
 
-    # 初始化隐藏状态
-    h_0_val = torch.zeros(config.num_layers, 1, config.hidden_size)
-    c_0_val = torch.zeros(config.num_layers, 1, config.hidden_size)
-    hidden_prev = (h_0_val, c_0_val)
+# online prediction
+for i in range(val_x.shape[0] - config.num_time_steps):
+    # 当前时间点的输入
+    current_input = val_x[i, :].unsqueeze(0).unsqueeze(0)
 
     # 进行预测
-    pred, hidden_prev = model(input_window, hidden_prev)
+    pred, hidden_prev = model(current_input, hidden_prev)
 
     # pred 的形状是 [1, 1, 1]，我们直接取出数值
     predictions.append(pred.item())
-
 
 # 准备绘图用的真实值 y
 # 预测是从第 num_time_steps 个点开始的
