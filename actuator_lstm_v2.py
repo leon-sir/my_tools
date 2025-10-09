@@ -15,7 +15,7 @@ BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 class Config:
     def __init__(self):
         self.using_real_data = True
-        self.lr = 1e-3
+        self.lr = 1e-4
         self.eps = 1e-8
         self.weight_decay = 0.0
         self.batch_size = 40
@@ -115,6 +115,18 @@ class LSTM_Net(nn.Module):
         return prediction.unsqueeze(1), hidden_prev
 
 
+def export_network(model: nn.Module, actuator_network_path: str, config: Config):
+    """将模型导出为 TorchScript (.pt) 和 ONNX (.onnx) 格式"""
+
+    # 在CPU上进行导出更安全，不依赖特定硬件
+    device_for_export = "cpu"
+    model.eval()    # 为了让导出的模型也能重置状态，需要先切换到评估模式
+    model.to(device_for_export)
+    model_scripted = torch.jit.script(model)
+    model_scripted.save(actuator_network_path)
+    print(f"Model successfully saved to {actuator_network_path}")
+
+
 def train_actuator_network(train_x: None, train_y: None,
                            actuator_network_path: str, config: Config):
 
@@ -171,114 +183,85 @@ def train_actuator_network(train_x: None, train_y: None,
 
     # print total loss
     print(f"Finished Training. Final Loss: {loss.item():.6f}")
-    # iter == config.iterations
-    model_scripted = torch.jit.script(model)  # Export to TorchScript
-    model_scripted.save(actuator_network_path)  # Save
 
-    print("****\n Exported actuator lstm networks successfully\n*****")
+    export_network(model, actuator_network_path, config)
 
     return model, hidden_prev
 
 
-# # 训练过程
-parser = argparse.ArgumentParser()
-parser.add_argument("--data", type=str, required=True, help="Path of data files")
-parser.add_argument("--output", type=str, required=True, help="Path to save or load the actuator network model")
-# parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
-args = parser.parse_args()
+def main():
+    # 训练过程
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data", type=str, required=True, help="Path of data files")
+    parser.add_argument("--output", type=str, required=True, help="Path to save or load the actuator network model")
+    # parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    args = parser.parse_args()
 
-data_path = os.path.join(BASE_PATH, args.data)
-output_path = os.path.join(BASE_PATH, args.output)
-current_script_name = os.path.splitext(os.path.basename(__file__))[0]
-policy_path = os.path.join(output_path, f"{current_script_name}_net.pt")
-figure_path = os.path.join(output_path, f"{current_script_name}_figure.png")
-config = Config()
+    data_path = os.path.join(BASE_PATH, args.data)
+    output_path = os.path.join(BASE_PATH, args.output)
+    current_script_name = os.path.splitext(os.path.basename(__file__))[0]
+    policy_path = os.path.join(output_path, f"{current_script_name}_net.pt")
+    figure_path = os.path.join(output_path, f"{current_script_name}_figure.png")
+    config = Config()
 
-data_dict, num_jets = load_data(data_path)
+    data_dict, num_jets = load_data(data_path)
 
-xs = torch.tensor(data_dict["w_f"][:, 0:1], dtype=torch.float)
-ys = torch.tensor(data_dict["F"][:, 0:1], dtype=torch.float)
-Time = torch.tensor(data_dict["Time"][:, 0:1], dtype=torch.float)
+    xs = torch.tensor(data_dict["w_f"][:, 0:1], dtype=torch.float)
+    ys = torch.tensor(data_dict["F"][:, 0:1], dtype=torch.float)
+    Time = torch.tensor(data_dict["Time"][:, 0:1], dtype=torch.float)
 
-num_data = xs.shape[0]
-num_train = int(num_data * 0.8)
+    num_data = xs.shape[0]
+    num_train = int(num_data * 0.8)
 
-# 训练数据
-train_x = xs[:num_train]
-train_y = ys[:num_train]
+    # 训练数据
+    train_x = xs[:num_train]
+    train_y = ys[:num_train]
 
-# 验证数据
-val_x = xs[num_train:]
-val_y = ys[num_train:]
-time_steps = Time[num_train:]-Time[num_train]
+    # 验证数据
+    val_x = xs[num_train:]
+    val_y = ys[num_train:]
+    time_steps = Time[num_train:]-Time[num_train]
 
-model, hidden_prev = train_actuator_network(train_x=train_x, train_y=train_y,
-                                            actuator_network_path=policy_path, config=config)
+    model, hidden_prev = train_actuator_network(train_x=train_x, train_y=train_y,
+                                                actuator_network_path=policy_path, config=config)
 
+    # Validation
+    model = torch.jit.load(policy_path).to("cpu")
 
-# Validation
-model = torch.jit.load(policy_path).to("cpu")
+    # 滑动窗口lstm的隐藏变量每次都要重置，自回归lstm需要保留
+    h_0_val = torch.zeros(config.num_layers, 1, config.hidden_size).cpu()
+    c_0_val = torch.zeros(config.num_layers, 1, config.hidden_size).cpu()
+    hidden_prev = (h_0_val, c_0_val)
+    predictions = []
 
-# 滑动窗口lstm的隐藏变量每次都要重置，自回归lstm需要保留
-h_0_val = torch.zeros(config.num_layers, 1, config.hidden_size).cpu()
-c_0_val = torch.zeros(config.num_layers, 1, config.hidden_size).cpu()
-hidden_prev = (h_0_val, c_0_val)
-predictions = []
+    # online prediction
+    for i in range(val_x.shape[0] - config.num_time_steps):
+        # 当前时间点的输入
+        current_input = val_x[i, :].unsqueeze(0).unsqueeze(0)
 
+        # 进行预测
+        pred, hidden_prev = model(current_input, hidden_prev)
 
-# online prediction
-for i in range(val_x.shape[0] - config.num_time_steps):
-    # 当前时间点的输入
-    current_input = val_x[i, :].unsqueeze(0).unsqueeze(0)
+        # pred 的形状是 [1, 1, 1]，我们直接取出数值
+        predictions.append(pred.item())
 
-    # 进行预测
-    pred, hidden_prev = model(current_input, hidden_prev)
+    # 准备绘图用的真实值 y
+    # 预测是从第 num_time_steps 个点开始的
+    true_y_for_plotting = val_y[config.num_time_steps:]
+    time_steps_for_plotting = time_steps[config.num_time_steps:]
 
-    # pred 的形状是 [1, 1, 1]，我们直接取出数值
-    predictions.append(pred.item())
+    plt.plot(time_steps_for_plotting, true_y_for_plotting.ravel(), c='y', label='y true')
+    plt.plot(time_steps_for_plotting, predictions,
+             c='b', label='y predicted', linestyle='--')
+    plt.legend()
+    plt.grid(True)
+    plt.xlabel("Time")
+    plt.ylabel("Force")
+    plt.savefig(figure_path, dpi=300, bbox_inches='tight')
+    plt.show()
 
-# 准备绘图用的真实值 y
-# 预测是从第 num_time_steps 个点开始的
-true_y_for_plotting = val_y[config.num_time_steps:]
-time_steps_for_plotting = time_steps[config.num_time_steps:]
-
-
-plt.plot(time_steps_for_plotting, true_y_for_plotting.ravel(), c='y', label='y true')
-plt.plot(time_steps_for_plotting, predictions,
-         c='b', label='y predicted', linestyle='--')
-plt.legend()
-plt.grid(True)
-plt.xlabel("Time")
-plt.ylabel("Force")
-plt.savefig(figure_path, dpi=300, bbox_inches='tight')
-plt.show()
-
+    export_network(model, policy_path, config)
 
 
-# def main():
-#     parser = argparse.ArgumentParser()
-#     parser.add_argument("--mode", type=str, required=True, choices=["train", "play"], help="Choose whether to train or evaluate the actuator network")
-#     parser.add_argument("--data", type=str, required=True, help="Path of data files")
-#     parser.add_argument("--output", type=str, required=True, help="Path to save or load the actuator network model")
-
-#     args = parser.parse_args()
-
-#     data_path = os.path.join(BASE_PATH, args.data)
-#     output_path = os.path.join(BASE_PATH, args.output)
-
-#     config = Config()
-
-#     if args.mode == "train":
-#         load_pretrained_model = False
-#     elif args.mode == "play":
-#         load_pretrained_model = True
-
-#     train_actuator_network_and_plot_predictions(
-#         data_path=data_path,
-#         actuator_network_path=output_path,
-#         load_pretrained_model=load_pretrained_model,
-#         config=config,
-#     )
-
-# if __name__ == "__main__":
-#     main()
+if __name__ == "__main__":
+    main()

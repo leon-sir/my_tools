@@ -1,2 +1,4 @@
 *.pt
 *.onnx
+.vscode/*
+train_turbo_csv/*.png

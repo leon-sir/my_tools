@@ -10,7 +10,7 @@
             "request": "launch",
             "args": ["--data", "train_turbo_csv/fly_robot_LPV_data.csv",
                 "--output", "train_turbo_csv"],
-            "program": "${workspaceFolder}/actuator_lstm_v1.py",
+            "program": "${workspaceFolder}/actuator_lstm_v2_2.py",
             "console": "integratedTerminal",
         },
         {

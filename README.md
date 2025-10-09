@@ -59,6 +59,9 @@ python3 actuator_lstm_v1.py --data train_turbo_csv/fly_robot_LPV_data.csv --outp
 主要靠hidden state，减少了推理消耗，训练时使用TBPTT，训练时长较久
 loss weight 逐渐变大，更专注于未来推断的准确率
 num_time_steps暂定50*0.005s=0.25s，等真机实验后要分析涡喷推力与多少时间前的输入的相关性再确定该值。
+
+Note: actuator_lstm_v2_1 把隐藏变量存于模型中，每次初始化自动置0，不能导出onnx，因为ONNX的静态图特性无法处理Python动态类型变化
+参考“https://www.php.cn/faq/1432002.html”
 ```bash
 python3 actuator_lstm_v2.py --data train_turbo_csv/fly_robot_LPV_data.csv --output train_turbo_csv
 ```

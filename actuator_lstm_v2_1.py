@@ -7,7 +7,8 @@ import numpy as np
 import torch.optim as optim
 from matplotlib import pyplot as plt
 from typing import Tuple, Optional  # noqa: F401
-
+import random  # noqa: F401
+import onnxruntime as ort
 
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 
@@ -15,10 +16,10 @@ BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 class Config:
     def __init__(self):
         self.using_real_data = True
-        self.lr = 1e-3
+        self.lr = 1e-4
         self.eps = 1e-8
         self.weight_decay = 0.0
-        self.batch_size = 1
+        self.batch_size = 40
         self.num_time_steps = 50
         self.device = "cuda:0"
         self.in_dim = 1
@@ -88,9 +89,10 @@ class LSTM_Net(nn.Module):
             nn.Linear(config.linear_units, config.out_dim)
         )
         # self.linear = nn.Linear(config.hidden_size, config.out_dim)  # 输出层
+        self.hidden_prev: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+        self._is_reset: bool = True
 
-    def forward(self, x: torch.Tensor, hidden_prev: Tuple[torch.Tensor, torch.Tensor]
-                ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
 
         """
         x: 一次性输入所有样本所有时刻的值(batch,seq_len,feature_len)
@@ -100,7 +102,17 @@ class LSTM_Net(nn.Module):
         # 1. 应用输入缩放
         x = x / self.input_scale
 
-        out, hidden_prev = self.rnn(x, hidden_prev)     # out hn
+        """ v2_1增加了隐藏层初始化 """
+        if self._is_reset:
+            batch_size = x.size(0)
+            h0 = torch.zeros(self.rnn.num_layers, batch_size, self.rnn.hidden_size).to(x.device)     # 短期（工作）记忆
+            c0 = torch.zeros(self.rnn.num_layers, batch_size, self.rnn.hidden_size).to(x.device)     # 长期记忆
+            self.hidden_prev = (h0, c0)
+            self._is_reset = False  # 重置后立即清除标志
+
+        self.hidden_prev = (self.hidden_prev[0].detach(), self.hidden_prev[1].detach())
+
+        out, self.hidden_prev = self.rnn(x, self.hidden_prev)     # out hn
 
         # 因为我们只关心最后一个时间步的输出，所以只对它进行处理
         # out shape: [batch, seq_len, hidden_size]
@@ -112,7 +124,11 @@ class LSTM_Net(nn.Module):
 
         # 2. 应用输出缩放
         prediction = prediction * self.output_scale
-        return prediction.unsqueeze(1), hidden_prev
+        return prediction.unsqueeze(1)
+
+    @torch.jit.export
+    def reset_hidden_state(self):
+        self._is_reset = True
 
 
 def export_network(model: nn.Module, actuator_network_path: str, config: Config):
@@ -126,6 +142,38 @@ def export_network(model: nn.Module, actuator_network_path: str, config: Config)
     model_scripted.save(actuator_network_path)
     print(f"Model successfully saved to {actuator_network_path}")
 
+    # --- 2. 导出为 ONNX ---
+    print("Exporting to ONNX...")
+    # 为了获得一个干净的、用于导出的模型实例，我们重新创建一个
+    model_for_export = LSTM_Net(config)
+    model_for_export.load_state_dict(model.state_dict())    # 加载训练好的权重
+    model_for_export.eval()
+
+    model_for_export.to(device_for_export)
+
+    onnx_path = actuator_network_path.replace('.pt', '.onnx')
+
+    # 创建符合模型 forward 方法的虚拟输入 (batch_size=1, seq_len=1)
+    dummy_x = torch.randn(1, 1, config.in_dim, device=device_for_export)
+
+    # 定义输入输出节点的名称
+    input_names = ["input_x"]
+    output_names = ["output_pred"]
+
+    # 导出模型
+    torch.onnx.export(model_for_export,
+                      dummy_x,  # 虚拟输入只有一个
+                      onnx_path,
+                      verbose=False,
+                      input_names=input_names,
+                      output_names=output_names,
+                      opset_version=11,
+                    #   dynamic_axes={'input_x': {0: 'batch_size'},
+                    #                 'output_pred': {0: 'batch_size'}}
+                      )
+
+    print(f"Model successfully exported to {onnx_path}")
+
 
 def train_actuator_network(train_x: None, train_y: None,
                            actuator_network_path: str, config: Config):
@@ -137,65 +185,54 @@ def train_actuator_network(train_x: None, train_y: None,
     optimizer = optim.Adam(model.parameters(), lr=config.lr,
                            eps=config.eps, weight_decay=config.weight_decay)
 
+    # train_len = train_x.shape[0] - config.num_time_steps -1
     train_len = train_x.shape[0] - config.num_time_steps
 
     for iter in range(config.iterations):
         # prepare batch_size data
+
         start_indices = np.random.randint(0, train_len, size=config.batch_size)
 
-        batch_x = []
-        batch_y = []
-
-        for start_idx in start_indices:
-            window_end_idx = start_idx + config.num_time_steps
-            target_idx = window_end_idx
-
-            # 收集一个窗口的输入和一个目标输出
-            batch_x.append(train_x[start_idx:window_end_idx])
-            batch_y.append(train_y[target_idx])
-
-        # 4. 将数据列表堆叠成一个批次张量，并移动到GPU
-        # x shape: [batch_size, num_time_steps, in_dim] -> [10, 50, 1]
-        x = torch.stack(batch_x).to(config.device)
-        # y shape: [batch_size, out_dim] -> [10, 1]
-        y = torch.stack(batch_y).to(config.device)
-
-        # 初始化记忆单元h0，c0永远是 (num_layers, batch_size, hidden_size)
-        h_0 = torch.zeros(config.num_layers, config.batch_size, config.hidden_size).to(config.device)   # 短期（工作）记忆
-        c_0 = torch.zeros(config.num_layers, config.batch_size, config.hidden_size).to(config.device)   # 长期记忆
-        hidden_prev = (h_0, c_0)
-
-        # start_idx = np.random.randint(0, train_len)
-        # # end_idx = start_idx + config.num_time_steps
-        # # 定义输入窗口和目标点
-        # window_end_idx = start_idx + config.num_time_steps
-        # target_idx = window_end_idx     # 目标是窗口结束后的那个点
-
-        # # [seq_len, feature] -> [batch=1, seq_len, feature]
-        # x = train_x[start_idx:window_end_idx].unsqueeze(0).to(config.device)        # x是包含过去N个点的序列
-        # y = train_y[target_idx].unsqueeze(0).to(config.device)                      # y是序列结束后的单个点
-
-        output, _ = model(x, hidden_prev)  # 喂入模型得到输出
-        # hidden_prev = (hidden_prev[0].detach(), hidden_prev[1].detach())
-        last_output = output.squeeze(1)     # 只取序列的最后一个输出用于计算损失
-        # last_output = output[:, -1, :]      # 只取序列的最后一个输出用于计算损失
-
-        # loss = criterion(output, y)  # 计算MSE损失
-        loss = criterion(last_output, y)
         model.zero_grad()
-        loss.backward()
+        model.reset_hidden_state()
+
+        # Truncated Backpropagation Through Time（截断式反向传播TBPTT）
+        # 参考 https://lightning.ai/docs/pytorch/stable/common/tbptt.html
+        total_loss = 0
+
+        for t in range(config.num_time_steps):
+            current_x_batch = train_x[start_indices + t].to(config.device)   # Shape: [batch_size, 1]
+            target_y_batch = train_y[start_indices + t].to(config.device)   # Shape: [batch_size, 1]
+
+            current_x_batch = current_x_batch.unsqueeze(1)
+
+            pred = model(current_x_batch)
+
+            loss = criterion(pred.squeeze(1), target_y_batch)
+
+            # 约后面的信号应该预测越准
+            # weight = 0.1 + 0.9 * (t / (config.num_time_steps - 1))
+
+            # loss = loss * weight
+            total_loss += loss.item()
+
+            # 反向传播（可以在每个时间步都做，也可以累积total loss在循环外）
+            loss.backward()
+
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
-        if iter % 1000 == 0:
-            print("Iteration: {} loss {}".format(iter, loss.item()))
+        if iter % 100 == 0:
+            mae = total_loss / config.num_time_steps / config.output_scale**2
+            print(f"Iteration: {iter} | loss {loss.item()}| mae: {mae:.4f}")
 
     # print total loss
     print(f"Finished Training. Final Loss: {loss.item():.6f}")
+    # iter == config.iterations
 
     export_network(model, actuator_network_path, config)
 
-    return model, hidden_prev
+    return model
 
 
 def main():
@@ -203,7 +240,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=str, required=True, help="Path of data files")
     parser.add_argument("--output", type=str, required=True, help="Path to save or load the actuator network model")
+    # parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     args = parser.parse_args()
+
     data_path = os.path.join(BASE_PATH, args.data)
     output_path = os.path.join(BASE_PATH, args.output)
     current_script_name = os.path.splitext(os.path.basename(__file__))[0]
@@ -229,35 +268,50 @@ def main():
     val_y = ys[num_train:]
     time_steps = Time[num_train:]-Time[num_train]
 
-    model, hidden_prev = train_actuator_network(train_x=train_x, train_y=train_y,
-                                                actuator_network_path=policy_path, config=config)
+    model = train_actuator_network(train_x=train_x, train_y=train_y,
+                                   actuator_network_path=policy_path, config=config)
 
     # Validation
-    model = torch.jit.load(policy_path).to("cpu")
 
-    # 滑动窗口lstm的隐藏变量每次都要重置，自回归lstm需要保留
-    h_0_val = torch.zeros(config.num_layers, config.batch_size, config.hidden_size).cpu()
-    c_0_val = torch.zeros(config.num_layers, config.batch_size, config.hidden_size).cpu()
-    hidden_prev = (h_0_val, c_0_val)
     predictions = []
+    if 1:   # test jit
+        model = torch.jit.load(policy_path).to("cpu")
+        model.eval()
+        model.reset_hidden_state()
+        # online prediction
+        for i in range(val_x.shape[0]-config.num_time_steps):
+            # 当前时间点的输入
+            current_input = val_x[i, :].unsqueeze(0).unsqueeze(0)
 
-    # 遍历验证集，使用滑动窗口进行预测
-    for i in range(val_x.shape[0] - config.num_time_steps):
-        # 构造输入窗口
-        start_idx = i
-        end_idx = i + config.num_time_steps
-        input_window = val_x[start_idx:end_idx].unsqueeze(0)    # Shape: [1, num_time_steps, 1]
+            pred = model(current_input)
 
-        # 初始化隐藏状态
-        h_0_val = torch.zeros(config.num_layers, 1, config.hidden_size)
-        c_0_val = torch.zeros(config.num_layers, 1, config.hidden_size)
-        hidden_prev = (h_0_val, c_0_val)
+            # pred 的形状是 [1, 1, 1]，直接取出数值
+            predictions.append(pred.item())
 
-        # 进行预测
-        pred, hidden_prev = model(input_window, hidden_prev)
+    else:   # test onnx
+        """
+        此版本ONNX失效
+        ONNX 模型是无状态的：它本身不保存任何类似 self.hidden_prev 的内部状态。
+        每次你调用 ort_session.run()，它都执行一次完全独立的计算，其内部的 LSTM 状态都是从零开始的。
+        """
+        onnx_path = policy_path.replace('.pt', '.onnx')
+        ort_session = ort.InferenceSession(onnx_path)
 
-        # pred 的形状是 [1, 1, 1]，我们直接取出数值
-        predictions.append(pred.item())
+        input_name = ort_session.get_inputs()[0].name
+
+        print(f"ONNX Model Input Name: {input_name}")
+        for i in range(val_x.shape[0]-config.num_time_steps):
+            current_input_np = val_x[i, :].unsqueeze(0).unsqueeze(0).numpy()
+
+            # onnxruntime 需要一个字典，key是输入名，value是Numpy数组
+            ort_inputs = {input_name: current_input_np}
+            ort_outs = ort_session.run(None, ort_inputs)
+
+            # 输出是一个列表，我们取第一个元素的数值
+            pred_value = ort_outs[0].item()
+            predictions.append(pred_value)
+
+
 
     # 准备绘图用的真实值 y
     # 预测是从第 num_time_steps 个点开始的
@@ -276,31 +330,6 @@ def main():
 
     export_network(model, policy_path, config)
 
-
-# def main():
-#     parser = argparse.ArgumentParser()
-#     parser.add_argument("--mode", type=str, required=True, choices=["train", "play"], help="Choose whether to train or evaluate the actuator network")
-#     parser.add_argument("--data", type=str, required=True, help="Path of data files")
-#     parser.add_argument("--output", type=str, required=True, help="Path to save or load the actuator network model")
-
-#     args = parser.parse_args()
-
-#     data_path = os.path.join(BASE_PATH, args.data)
-#     output_path = os.path.join(BASE_PATH, args.output)
-
-#     config = Config()
-
-#     if args.mode == "train":
-#         load_pretrained_model = False
-#     elif args.mode == "play":
-#         load_pretrained_model = True
-
-#     train_actuator_network_and_plot_predictions(
-#         data_path=data_path,
-#         actuator_network_path=output_path,
-#         load_pretrained_model=load_pretrained_model,
-#         config=config,
-#     )
 
 if __name__ == "__main__":
     main()
